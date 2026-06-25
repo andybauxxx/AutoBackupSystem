@@ -1,0 +1,24 @@
+# Blender / Python cache
+__pycache__/
+*.py[cod]
+
+# Local Blender extension packages
+*.zip
+*.blend
+*.blend1
+*.blend@
+
+# Local test previews and temporary files
+tests/ui_preview.png
+*.tmp
+*.log
+
+# Local Codex / agent workspace state
+.agents/
+.codex/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
