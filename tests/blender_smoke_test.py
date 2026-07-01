@@ -18,6 +18,10 @@ addon = importlib.import_module("cyclic_auto_backup")
 addon.register()
 
 assert addon._operator_is_excluded("TRANSFORM_OT_resize") is False
+assert addon._operator_is_excluded("CYCLICBACKUP_OT_backup_now") is True
+assert addon._operator_is_excluded("CYCLICBACKUP_OT_file_settings") is True
+assert addon._operator_is_excluded("cyclicbackup.backup_now") is True
+assert addon._operator_is_excluded("cyclicbackup.file_settings") is True
 
 with tempfile.TemporaryDirectory(prefix="cyclic_backup_test_") as temporary_dir:
     root = Path(temporary_dir)

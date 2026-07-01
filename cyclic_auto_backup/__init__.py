@@ -27,7 +27,7 @@ from bpy.types import AddonPreferences, Operator, Panel, PropertyGroup
 bl_info = {
     "name": "AutoBackupSystem",
     "author": "Andy Bau",
-    "version": (1, 3, 2),
+    "version": (1, 4, 5),
     "blender": (4, 2, 0),
     "location": "3D Viewport > Sidebar > Auto Backup",
     "description": "Create a rotating .blend backup after a set number of meaningful edits",
@@ -56,6 +56,9 @@ _RUNTIME: dict[str, Any] = {
     "pending_backup_reset_counter": True,
     "animation_playing": False,
     "rendering": False,
+    "setup_prompt_pending": False,
+    "setup_prompted_session": False,
+    "syncing_file_settings": False,
 }
 
 
@@ -64,6 +67,7 @@ _RUNTIME: dict[str, Any] = {
 _EXCLUDED_OPERATOR_EXACT = {
     "CYCLICBACKUP_OT_backup_now",
     "CYCLICBACKUP_OT_choose_backup_directory",
+    "CYCLICBACKUP_OT_file_settings",
     "CYCLICBACKUP_OT_open_backup_folder",
     "CYCLICBACKUP_OT_reset_counter",
     "CYCLICBACKUP_OT_use_default_directory",
@@ -126,16 +130,44 @@ def _preferences(context: bpy.types.Context | None = None) -> AddonPreferences |
     return addon.preferences if addon else None
 
 
+def _blend_filepath() -> str:
+    try:
+        return str(getattr(bpy.data, "filepath", "") or "")
+    except (AttributeError, ReferenceError, RuntimeError):
+        return ""
+
+
+def _all_scenes() -> list[bpy.types.Scene]:
+    try:
+        return list(getattr(bpy.data, "scenes", []) or [])
+    except (AttributeError, ReferenceError, RuntimeError):
+        return []
+
+
+def _settings(context: bpy.types.Context | None = None) -> "CYCLICBACKUP_PG_settings | None":
+    context = context or bpy.context
+    try:
+        scene = getattr(context, "scene", None)
+    except (AttributeError, ReferenceError, RuntimeError):
+        scene = None
+    scenes = _all_scenes()
+    if scene is None and scenes:
+        scene = scenes[0]
+    if scene is None or not hasattr(scene, "cyclic_auto_backup_settings"):
+        return None
+    return scene.cyclic_auto_backup_settings
+
+
 def _config(context: bpy.types.Context | None = None) -> dict[str, Any]:
-    prefs = _preferences(context)
+    settings = _settings(context)
     return {
-        "enabled": bool(getattr(prefs, "enabled", True)),
+        "enabled": bool(getattr(settings, "enabled", True)),
         "operation_target": int(
-            getattr(prefs, "operation_target", DEFAULT_OPERATION_TARGET)
+            getattr(settings, "operation_target", DEFAULT_OPERATION_TARGET)
         ),
-        "backup_slots": int(getattr(prefs, "backup_slots", DEFAULT_BACKUP_SLOTS)),
-        "backup_directory": str(getattr(prefs, "backup_directory", "")),
-        "quiet_period": float(getattr(prefs, "quiet_period", DEFAULT_QUIET_PERIOD)),
+        "backup_slots": int(getattr(settings, "backup_slots", DEFAULT_BACKUP_SLOTS)),
+        "backup_directory": str(getattr(settings, "backup_directory", "")),
+        "quiet_period": float(getattr(settings, "quiet_period", DEFAULT_QUIET_PERIOD)),
     }
 
 
@@ -193,9 +225,26 @@ def _sync_operator_baseline() -> None:
 def _operator_is_excluded(operator_id: str) -> bool:
     if not operator_id:
         return True
+    if operator_id.lower().startswith("cyclicbackup."):
+        return True
+    if operator_id.upper().startswith("CYCLICBACKUP_OT_"):
+        return True
     if operator_id in _EXCLUDED_OPERATOR_EXACT:
         return True
     return any(token in operator_id for token in _EXCLUDED_OPERATOR_TOKENS)
+
+
+def _suppress_plugin_ui_activity(duration: float = 1.0) -> None:
+    """Prevent AutoBackupSystem's own UI from being counted as an edit."""
+    _clear_pending_change()
+    _RUNTIME["suppress_until"] = max(
+        float(_RUNTIME["suppress_until"]), time.monotonic() + duration
+    )
+    try:
+        _sync_operator_baseline()
+    except Exception:
+        # UI suppression should never break a user-facing button.
+        pass
 
 
 def _operator_is_undoable(operator: bpy.types.Operator) -> bool:
@@ -321,15 +370,16 @@ def _sanitize_stem(value: str) -> str:
 
 
 def _project_stem() -> str:
-    filepath = bpy.data.filepath
+    filepath = _blend_filepath()
     if not filepath:
         return "Untitled"
     return _sanitize_stem(Path(filepath).stem)
 
 
 def _default_backup_directory() -> Path:
-    if bpy.data.filepath:
-        return Path(bpy.data.filepath).resolve().parent / "AutoBackups"
+    filepath = _blend_filepath()
+    if filepath:
+        return Path(filepath).resolve().parent / "AutoBackups"
 
     return Path(bpy.app.tempdir).resolve() / "Blender_AutoBackups"
 
@@ -416,7 +466,7 @@ def _perform_backup(*, reset_counter: bool) -> bool:
     config = _config()
     target = _next_backup_path(config)
     temporary = target.with_name(f".{target.stem}.writing.blend")
-    original_filepath = bpy.data.filepath
+    original_filepath = _blend_filepath()
     previous_count = state.operation_count
 
     _RUNTIME["backup_running"] = True
@@ -444,7 +494,7 @@ def _perform_backup(*, reset_counter: bool) -> bool:
         )
         if "FINISHED" not in result:
             raise RuntimeError(f"Blender save operation did not finish: {sorted(result)}")
-        if bpy.data.filepath != original_filepath:
+        if _blend_filepath() != original_filepath:
             raise RuntimeError("The backup unexpectedly changed the current file path")
         if not temporary.exists():
             raise RuntimeError("Blender did not create the expected temporary backup file")
@@ -479,6 +529,7 @@ def _perform_backup(*, reset_counter: bool) -> bool:
 
 
 def _request_backup_location(*, reset_counter: bool) -> bool:
+    _suppress_plugin_ui_activity()
     if _RUNTIME["waiting_for_location"]:
         return True
 
@@ -513,6 +564,52 @@ def _request_backup_location(*, reset_counter: bool) -> bool:
         state.last_was_error = True
         _tag_redraw()
         return False
+
+
+def _schedule_initial_setup_prompt(delay: float = 0.8) -> None:
+    if (
+        bpy.app.background
+        or not _RUNTIME["registered"]
+        or os.environ.get("AUTOBACKUP_SUPPRESS_SETUP_PROMPT") == "1"
+        or _RUNTIME["setup_prompt_pending"]
+        or _RUNTIME["setup_prompted_session"]
+        or _blend_filepath()
+    ):
+        return
+
+    _RUNTIME["setup_prompt_pending"] = True
+    if not bpy.app.timers.is_registered(_show_initial_setup_popup):
+        bpy.app.timers.register(
+            _show_initial_setup_popup, first_interval=delay, persistent=False
+        )
+
+
+def _show_initial_setup_popup() -> float | None:
+    if not _RUNTIME["registered"] or bpy.app.background:
+        _RUNTIME["setup_prompt_pending"] = False
+        return None
+
+    window_manager = getattr(bpy.context, "window_manager", None)
+    if window_manager is None or not window_manager.windows:
+        return 0.5
+
+    if _blend_filepath() or _RUNTIME["setup_prompted_session"]:
+        _RUNTIME["setup_prompt_pending"] = False
+        return None
+
+    window = window_manager.windows[0]
+    _RUNTIME["setup_prompt_pending"] = False
+    _RUNTIME["setup_prompted_session"] = True
+    try:
+        with bpy.context.temp_override(window=window):
+            bpy.ops.cyclicbackup.file_settings("INVOKE_DEFAULT", auto_prompt=True)
+    except Exception as exc:
+        state = _state()
+        if state is not None:
+            state.last_message = f"Unable to open setup dialog: {exc}"
+            state.last_was_error = True
+        print(f"[AutoBackupSystem] Unable to open setup dialog: {exc}")
+    return None
 
 
 def _monitor_timer() -> float | None:
@@ -581,7 +678,42 @@ def _reset_detection(*, keep_count: bool = True) -> None:
 
 
 def _settings_updated(_self: Any, _context: bpy.types.Context) -> None:
+    _suppress_plugin_ui_activity()
+    if _RUNTIME["syncing_file_settings"]:
+        return
+
+    scenes = _all_scenes()
+    if _self is not None and scenes:
+        _RUNTIME["syncing_file_settings"] = True
+        try:
+            for scene in scenes:
+                if not hasattr(scene, "cyclic_auto_backup_settings"):
+                    continue
+                other = scene.cyclic_auto_backup_settings
+                try:
+                    if other.as_pointer() == _self.as_pointer():
+                        continue
+                except (AttributeError, ReferenceError):
+                    pass
+                other.enabled = bool(getattr(_self, "enabled", True))
+                other.operation_target = int(
+                    getattr(_self, "operation_target", DEFAULT_OPERATION_TARGET)
+                )
+                other.backup_slots = int(
+                    getattr(_self, "backup_slots", DEFAULT_BACKUP_SLOTS)
+                )
+                other.backup_directory = str(getattr(_self, "backup_directory", ""))
+                other.quiet_period = float(
+                    getattr(_self, "quiet_period", DEFAULT_QUIET_PERIOD)
+                )
+        finally:
+            _RUNTIME["syncing_file_settings"] = False
+
     _reset_detection(keep_count=True)
+
+
+def _ui_settings_updated(_self: Any, _context: bpy.types.Context) -> None:
+    _suppress_plugin_ui_activity()
 
 
 @persistent
@@ -662,24 +794,17 @@ def _on_render_post(*_args: Any) -> None:
 def _on_load_post(*_args: Any) -> None:
     _RUNTIME["animation_playing"] = False
     _RUNTIME["rendering"] = False
+    _RUNTIME["setup_prompt_pending"] = False
+    _RUNTIME["setup_prompted_session"] = False
     _reset_detection(keep_count=True)
     state = _state()
     if state is not None:
         state.last_message = "Monitoring"
         state.last_was_error = False
+    _schedule_initial_setup_prompt()
 
 
-class CYCLICBACKUP_PG_state(PropertyGroup):
-    operation_count: IntProperty(name="Meaningful Edits", default=0, min=0)
-    last_backup_path: StringProperty(name="Latest Backup", default="", subtype="FILE_PATH")
-    last_backup_time: StringProperty(name="Backup Time", default="")
-    last_message: StringProperty(name="Status", default="Monitoring")
-    last_was_error: BoolProperty(name="Error", default=False)
-
-
-class CYCLICBACKUP_Preferences(AddonPreferences):
-    bl_idname = ADDON_PACKAGE
-
+class CYCLICBACKUP_PG_settings(PropertyGroup):
     enabled: BoolProperty(
         name="Enable Automatic Backups",
         description="Monitor meaningful edits and create a rotating backup when the target is reached",
@@ -720,22 +845,29 @@ class CYCLICBACKUP_Preferences(AddonPreferences):
         subtype="TIME",
         update=_settings_updated,
     )
-    show_advanced: BoolProperty(name="Advanced Detection Settings", default=False)
-    show_backup_settings: BoolProperty(name="Show Backup Settings", default=False)
+    show_backup_settings: BoolProperty(
+        name="Show Backup Settings", default=False, update=_ui_settings_updated
+    )
+    show_advanced: BoolProperty(
+        name="Advanced Detection Settings", default=False, update=_ui_settings_updated
+    )
+
+
+class CYCLICBACKUP_PG_state(PropertyGroup):
+    operation_count: IntProperty(name="Meaningful Edits", default=0, min=0)
+    last_backup_path: StringProperty(name="Latest Backup", default="", subtype="FILE_PATH")
+    last_backup_time: StringProperty(name="Backup Time", default="")
+    last_message: StringProperty(name="Status", default="Monitoring")
+    last_was_error: BoolProperty(name="Error", default=False)
+
+
+class CYCLICBACKUP_Preferences(AddonPreferences):
+    bl_idname = ADDON_PACKAGE
 
     def draw(self, _context: bpy.types.Context) -> None:
         layout = self.layout
-        layout.prop(self, "enabled")
-        column = layout.column(align=True)
-        column.enabled = self.enabled
-        column.prop(self, "operation_target")
-        column.prop(self, "backup_slots")
-        column.prop(self, "backup_directory")
-        layout.prop(self, "show_advanced", toggle=True)
-        if self.show_advanced:
-            advanced = layout.box()
-            advanced.prop(self, "quiet_period")
-            advanced.label(text="This delay only groups continuous changes; it never triggers a backup.")
+        layout.label(text="AutoBackupSystem settings are saved per .blend file.")
+        layout.label(text="Use 3D Viewport > Sidebar > Auto Backup.")
 
 
 class CYCLICBACKUP_OT_backup_now(Operator):
@@ -745,6 +877,7 @@ class CYCLICBACKUP_OT_backup_now(Operator):
     bl_options = {"REGISTER"}
 
     def execute(self, _context: bpy.types.Context) -> set[str]:
+        _suppress_plugin_ui_activity()
         if not _config()["backup_directory"].strip():
             if _request_backup_location(reset_counter=False):
                 self.report({"INFO"}, "Choose a backup location to continue")
@@ -768,6 +901,7 @@ class CYCLICBACKUP_OT_open_backup_folder(Operator):
     bl_options = {"INTERNAL"}
 
     def execute(self, _context: bpy.types.Context) -> set[str]:
+        _suppress_plugin_ui_activity()
         try:
             directory = _backup_directory()
             directory.mkdir(parents=True, exist_ok=True)
@@ -789,9 +923,10 @@ class CYCLICBACKUP_OT_choose_backup_directory(Operator):
     resume_pending_backup: BoolProperty(default=False, options={"HIDDEN", "SKIP_SAVE"})
 
     def execute(self, context: bpy.types.Context) -> set[str]:
-        prefs = _preferences(context)
-        if prefs is None:
-            self.report({"ERROR"}, "Add-on preferences are unavailable")
+        _suppress_plugin_ui_activity()
+        settings = _settings(context)
+        if settings is None:
+            self.report({"ERROR"}, "File-specific settings are unavailable")
             return {"CANCELLED"}
 
         selected = self.directory.strip()
@@ -807,7 +942,7 @@ class CYCLICBACKUP_OT_choose_backup_directory(Operator):
         try:
             directory = Path(bpy.path.abspath(selected)).expanduser().resolve()
             directory.mkdir(parents=True, exist_ok=True)
-            prefs.backup_directory = str(directory)
+            settings.backup_directory = str(directory)
             _RUNTIME["waiting_for_location"] = False
             if resume_backup:
                 _RUNTIME["backup_requested"] = True
@@ -823,6 +958,7 @@ class CYCLICBACKUP_OT_choose_backup_directory(Operator):
             return {"CANCELLED"}
 
     def invoke(self, context: bpy.types.Context, _event: bpy.types.Event) -> set[str]:
+        _suppress_plugin_ui_activity()
         initial_directory = _backup_directory()
         if not initial_directory.exists():
             initial_directory = initial_directory.parent
@@ -831,6 +967,7 @@ class CYCLICBACKUP_OT_choose_backup_directory(Operator):
         return {"RUNNING_MODAL"}
 
     def cancel(self, context: bpy.types.Context) -> None:
+        _suppress_plugin_ui_activity()
         if self.resume_pending_backup or _RUNTIME["waiting_for_location"]:
             _RUNTIME["waiting_for_location"] = False
             _RUNTIME["backup_requested"] = False
@@ -848,18 +985,70 @@ class CYCLICBACKUP_OT_use_default_directory(Operator):
     bl_options = {"INTERNAL"}
 
     def execute(self, context: bpy.types.Context) -> set[str]:
-        prefs = _preferences(context)
-        if prefs is None:
+        _suppress_plugin_ui_activity()
+        settings = _settings(context)
+        if settings is None:
             return {"CANCELLED"}
         try:
             directory = _default_backup_directory()
             directory.mkdir(parents=True, exist_ok=True)
-            prefs.backup_directory = str(directory)
+            settings.backup_directory = str(directory)
             self.report({"INFO"}, f"Default backup location set to: {directory}")
             return {"FINISHED"}
         except Exception as exc:
             self.report({"ERROR"}, f"Unable to set default backup location: {exc}")
             return {"CANCELLED"}
+
+
+class CYCLICBACKUP_OT_file_settings(Operator):
+    bl_idname = "cyclicbackup.file_settings"
+    bl_label = "AutoBackup Setup"
+    bl_description = "Edit AutoBackupSystem settings saved in this blend file"
+    bl_options = {"INTERNAL"}
+
+    auto_prompt: BoolProperty(default=False, options={"HIDDEN", "SKIP_SAVE"})
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return _settings(context) is not None
+
+    def draw(self, context: bpy.types.Context) -> None:
+        settings = _settings(context)
+        layout = self.layout
+        if settings is None:
+            layout.label(text="File-specific settings are unavailable", icon="ERROR")
+            return
+
+        column = layout.column(align=True)
+        column.prop(settings, "enabled", text="Enabled")
+        column.prop(settings, "backup_directory", text="Folder")
+        column.prop(settings, "operation_target", text="Edit Target")
+        column.prop(settings, "backup_slots", text="Keep Files")
+
+    def invoke(self, context: bpy.types.Context, _event: bpy.types.Event) -> set[str]:
+        _suppress_plugin_ui_activity()
+        return context.window_manager.invoke_props_dialog(self, width=420)
+
+    def execute(self, _context: bpy.types.Context) -> set[str]:
+        _suppress_plugin_ui_activity()
+        _RUNTIME["setup_prompted_session"] = True
+        _tag_redraw()
+        return {"FINISHED"}
+
+    def cancel(self, _context: bpy.types.Context) -> None:
+        _suppress_plugin_ui_activity()
+        if (
+            self.auto_prompt
+            and not bpy.app.background
+            and os.environ.get("AUTOBACKUP_SUPPRESS_SETUP_PROMPT") != "1"
+            and not _blend_filepath()
+        ):
+            _RUNTIME["setup_prompted_session"] = False
+            _RUNTIME["setup_prompt_pending"] = False
+            _schedule_initial_setup_prompt(delay=0.1)
+        else:
+            _RUNTIME["setup_prompted_session"] = True
+        _tag_redraw()
 
 
 class CYCLICBACKUP_OT_reset_counter(Operator):
@@ -871,6 +1060,7 @@ class CYCLICBACKUP_OT_reset_counter(Operator):
     def invoke(
         self, context: bpy.types.Context, event: bpy.types.Event
     ) -> set[str]:
+        _suppress_plugin_ui_activity()
         state = _state(context)
         if state is None or state.operation_count <= 0:
             self.report({"INFO"}, "The meaningful edit counter is already zero")
@@ -885,6 +1075,7 @@ class CYCLICBACKUP_OT_reset_counter(Operator):
         )
 
     def execute(self, _context: bpy.types.Context) -> set[str]:
+        _suppress_plugin_ui_activity()
         state = _state()
         if state is None:
             return {"CANCELLED"}
@@ -906,18 +1097,18 @@ class CYCLICBACKUP_PT_panel(Panel):
 
     def draw(self, context: bpy.types.Context) -> None:
         layout = self.layout
-        prefs = _preferences(context)
+        settings = _settings(context)
         state = _state(context)
 
-        if prefs is None or state is None:
-            layout.label(text="Add-on preferences are not ready", icon="ERROR")
+        if settings is None or state is None:
+            layout.label(text="AutoBackupSystem settings are not ready", icon="ERROR")
             return
 
         header = layout.row(align=True)
-        header.prop(prefs, "enabled", text="Enabled")
+        header.prop(settings, "enabled", text="Enabled")
         header_status = header.row()
         header_status.alignment = "RIGHT"
-        if not prefs.enabled:
+        if not settings.enabled:
             header_status.label(text="Paused", icon="PAUSE")
         elif _RUNTIME["waiting_for_location"]:
             header_status.label(text="Needs Location", icon="FILE_FOLDER")
@@ -931,31 +1122,31 @@ class CYCLICBACKUP_PT_panel(Panel):
         path_box = layout.box()
         path_box.label(
             text="Backup Location",
-            icon="FILE_FOLDER" if prefs.backup_directory else "ERROR",
+            icon="FILE_FOLDER" if settings.backup_directory else "ERROR",
         )
-        path_box.prop(prefs, "backup_directory", text="")
+        path_box.prop(settings, "backup_directory", text="")
         path_row = path_box.row(align=True)
-        path_row.alert = not bool(prefs.backup_directory)
+        path_row.alert = not bool(settings.backup_directory)
         path_row.operator("cyclicbackup.choose_backup_directory", icon="FILEBROWSER")
         open_row = path_row.row(align=True)
-        open_row.enabled = bool(prefs.backup_directory)
+        open_row.enabled = bool(settings.backup_directory)
         open_row.operator(
             "cyclicbackup.open_backup_folder", text="Open", icon="FILE_FOLDER"
         )
-        if prefs.backup_directory:
+        if settings.backup_directory:
             path_box.operator(
                 "cyclicbackup.use_default_directory", icon="LOOP_BACK"
             )
 
         status_box = layout.box()
-        target = max(1, prefs.operation_target)
+        target = max(1, settings.operation_target)
         counter_row = status_box.row(align=True)
         counter_row.label(text="Meaningful Edits", icon="REC")
         counter_value = counter_row.row()
         counter_value.alignment = "RIGHT"
         counter_value.label(text=f"{state.operation_count} / {target}")
         status_message = (
-            state.last_message if prefs.enabled else "Automatic backups are paused"
+            state.last_message if settings.enabled else "Automatic backups are paused"
         )
         status_box.label(
             text=status_message,
@@ -973,25 +1164,28 @@ class CYCLICBACKUP_PT_panel(Panel):
         settings_box = layout.box()
         settings_header = settings_box.row(align=True)
         settings_header.prop(
-            prefs,
+            settings,
             "show_backup_settings",
             text="",
-            icon="TRIA_DOWN" if prefs.show_backup_settings else "TRIA_RIGHT",
+            icon="TRIA_DOWN" if settings.show_backup_settings else "TRIA_RIGHT",
             emboss=False,
         )
         settings_header.label(text="Backup Settings")
+        settings_header.operator(
+            "cyclicbackup.file_settings", text="", icon="PREFERENCES"
+        )
         settings_summary = settings_header.row()
         settings_summary.alignment = "RIGHT"
         settings_summary.label(
-            text=f"{prefs.operation_target} edits / {prefs.backup_slots} files"
+            text=f"{settings.operation_target} edits / {settings.backup_slots} files"
         )
-        if prefs.show_backup_settings:
-            settings = settings_box.column(align=True)
-            settings.enabled = prefs.enabled
-            settings.prop(prefs, "operation_target")
-            settings.prop(prefs, "backup_slots")
+        if settings.show_backup_settings:
+            settings_column = settings_box.column(align=True)
+            settings_column.enabled = settings.enabled
+            settings_column.prop(settings, "operation_target")
+            settings_column.prop(settings, "backup_slots")
 
-        if not prefs.backup_directory:
+        if not settings.backup_directory:
             warning = layout.box()
             warning.label(text="No backup location selected", icon="INFO")
             warning.label(text="A folder picker will open when a backup is triggered.")
@@ -1009,12 +1203,14 @@ class CYCLICBACKUP_PT_panel(Panel):
 
 
 _CLASSES = (
+    CYCLICBACKUP_PG_settings,
     CYCLICBACKUP_PG_state,
     CYCLICBACKUP_Preferences,
     CYCLICBACKUP_OT_backup_now,
     CYCLICBACKUP_OT_open_backup_folder,
     CYCLICBACKUP_OT_choose_backup_directory,
     CYCLICBACKUP_OT_use_default_directory,
+    CYCLICBACKUP_OT_file_settings,
     CYCLICBACKUP_OT_reset_counter,
     CYCLICBACKUP_PT_panel,
 )
@@ -1036,6 +1232,9 @@ def register() -> None:
     for cls in _CLASSES:
         bpy.utils.register_class(cls)
 
+    bpy.types.Scene.cyclic_auto_backup_settings = PointerProperty(
+        type=CYCLICBACKUP_PG_settings
+    )
     bpy.types.WindowManager.cyclic_auto_backup_state = PointerProperty(
         type=CYCLICBACKUP_PG_state
     )
@@ -1056,6 +1255,8 @@ def register() -> None:
         state.last_message = "Monitoring"
         state.last_was_error = False
 
+    _schedule_initial_setup_prompt()
+
     if not bpy.app.timers.is_registered(_monitor_timer):
         bpy.app.timers.register(_monitor_timer, first_interval=TIMER_INTERVAL, persistent=True)
 
@@ -1072,6 +1273,9 @@ def unregister() -> None:
 
     if hasattr(bpy.types.WindowManager, "cyclic_auto_backup_state"):
         del bpy.types.WindowManager.cyclic_auto_backup_state
+
+    if hasattr(bpy.types.Scene, "cyclic_auto_backup_settings"):
+        del bpy.types.Scene.cyclic_auto_backup_settings
 
     for cls in reversed(_CLASSES):
         bpy.utils.unregister_class(cls)

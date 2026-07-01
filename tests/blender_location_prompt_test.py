@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import sys
 from pathlib import Path
 
 import bpy
 
 
+os.environ["AUTOBACKUP_SUPPRESS_SETUP_PROMPT"] = "1"
 WORKSPACE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(WORKSPACE))
 addon = importlib.import_module("cyclic_auto_backup")

@@ -8,6 +8,8 @@ Default behavior:
 - Keep five backup files.
 - Continue filename numbering forever, then delete the actual oldest backup when the retention limit is exceeded.
 - Ask for a backup folder automatically when a backup is due and no location has been configured.
+- Save backup settings per `.blend` file instead of sharing one global configuration.
+- Show a setup dialog when a new unsaved file is opened.
 
 Supported Blender versions: 4.2 and later.
 
@@ -35,13 +37,13 @@ The extension source and usage details are in [`cyclic_auto_backup/README.md`](c
 From the project root, run Blender's extension builder:
 
 ```powershell
-& 'C:\Program Files\Blender Foundation\Blender 5.0\blender.exe' --command extension build --source-dir '.\cyclic_auto_backup' --output-filepath '.\auto_backup_system-1.3.2.zip' --verbose
+& 'C:\Program Files\Blender Foundation\Blender 5.0\blender.exe' --command extension build --source-dir '.\cyclic_auto_backup' --output-filepath '.\auto_backup_system-1.4.5.zip' --verbose
 ```
 
 ## Validate
 
 ```powershell
-& 'C:\Program Files\Blender Foundation\Blender 5.0\blender.exe' --command extension validate '.\auto_backup_system-1.3.2.zip'
+& 'C:\Program Files\Blender Foundation\Blender 5.0\blender.exe' --command extension validate '.\auto_backup_system-1.4.5.zip'
 ```
 
 ## License

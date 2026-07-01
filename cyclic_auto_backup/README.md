@@ -1,6 +1,6 @@
 # AutoBackupSystem
 
-This Blender add-on creates a rotating `.blend` backup after a configurable number of meaningful edits. By default it backs up every 50 meaningful edits and keeps five files; the sixth backup replaces the oldest one.
+This Blender add-on creates a rotating `.blend` backup after a configurable number of meaningful edits. By default it backs up every 50 meaningful edits and keeps five files; the sixth backup deletes the actual oldest backup after the new numbered file is created.
 
 ## Meaningful edits
 
@@ -18,11 +18,17 @@ Blender does not expose one universal “operation completed” event across eve
 
 1. Open `Edit > Preferences > Add-ons` in Blender.
 2. Choose `Install from Disk...`.
-3. Select `auto_backup_system-1.3.2.zip`.
+3. Select `auto_backup_system-1.4.5.zip`.
 4. Enable `AutoBackupSystem`.
 5. Open the `Auto Backup` tab in the 3D Viewport sidebar (`N`).
 
 Supported Blender versions: 4.2 and later.
+
+## Per-file settings
+
+AutoBackupSystem settings are saved inside each `.blend` file. Each project can have its own enabled state, backup location, edit target, retention count, and edit merge delay.
+
+When a new unsaved file is opened, AutoBackupSystem shows a small setup dialog so the file can start with its own backup settings. If the dialog is dismissed, the same settings are still available in the `Auto Backup` sidebar panel.
 
 ## Backup location
 

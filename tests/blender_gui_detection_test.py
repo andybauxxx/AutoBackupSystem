@@ -58,6 +58,7 @@ def finish():
     results["passed"] = (
         results.get("after_add") == 1
         and results.get("after_selection") == 1
+        and results.get("after_plugin_ui") == 1
         and results.get("after_direct_edit") == 2
         and results.get("after_undo") == 3
     )
@@ -109,24 +110,32 @@ def driver():
         if stage == 3:
             addon._monitor_timer()
             results["after_selection"] = state.operation_count
-            test_object.select_set(True)
-            bpy.context.view_layer.objects.active = test_object
-            with view3d_override():
-                bpy.ops.transform.resize(value=(1.25, 1.25, 1.25))
-                bpy.context.view_layer.update()
+            bpy.ops.cyclicbackup.use_default_directory()
+            bpy.context.scene.cyclic_auto_backup_settings.show_backup_settings = True
             stage = 4
             return 1.2
 
         if stage == 4:
             addon._monitor_timer()
-            results["after_direct_edit"] = state.operation_count
-            # Python-triggered operators do not enter Blender's interactive undo
-            # stack, so exercise the same post-undo hook directly here.
-            addon._on_undo_post(None)
+            results["after_plugin_ui"] = state.operation_count
+            test_object.select_set(True)
+            bpy.context.view_layer.objects.active = test_object
+            with view3d_override():
+                bpy.ops.transform.resize(value=(1.25, 1.25, 1.25))
+                bpy.context.view_layer.update()
             stage = 5
             return 1.2
 
         if stage == 5:
+            addon._monitor_timer()
+            results["after_direct_edit"] = state.operation_count
+            # Python-triggered operators do not enter Blender's interactive undo
+            # stack, so exercise the same post-undo hook directly here.
+            addon._on_undo_post(None)
+            stage = 6
+            return 1.2
+
+        if stage == 6:
             addon._monitor_timer()
             results["after_undo"] = state.operation_count
             results["depsgraph_updates_by_stage"] = observed_updates

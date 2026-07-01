@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import importlib
+import os
 import time
 from pathlib import Path
 
 import bpy
 
 
+os.environ["AUTOBACKUP_SUPPRESS_SETUP_PROMPT"] = "1"
 OUTPUT = Path(__file__).resolve().parent / "ui_preview.png"
 stage = 0
 addon_module = None
@@ -37,12 +39,12 @@ def driver():
             if "cyclic_auto_backup" in addon.module
         )
         addon_module = importlib.import_module(key)
-        prefs = bpy.context.preferences.addons[key].preferences
-        prefs.enabled = True
-        prefs.backup_directory = "D:\\Blender Backups"
-        prefs.operation_target = 50
-        prefs.backup_slots = 3
-        prefs.show_backup_settings = False
+        settings = bpy.context.scene.cyclic_auto_backup_settings
+        settings.enabled = True
+        settings.backup_directory = "D:\\Blender Backups"
+        settings.operation_target = 50
+        settings.backup_slots = 3
+        settings.show_backup_settings = False
 
         addon_module._RUNTIME["suppress_until"] = time.monotonic() + 10.0
         state = bpy.context.window_manager.cyclic_auto_backup_state
