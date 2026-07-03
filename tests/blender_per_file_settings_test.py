@@ -34,6 +34,22 @@ with tempfile.TemporaryDirectory(prefix="autobackup_per_file_") as temporary_dir
     root = Path(temporary_dir)
     file_a = root / "ProjectA.blend"
     file_b = root / "ProjectB.blend"
+    dialog_backups = root / "DialogBackups"
+
+    result = bpy.ops.cyclicbackup.file_settings(
+        enabled=False,
+        backup_directory=str(dialog_backups),
+        operation_target=21,
+        backup_slots=4,
+    )
+    assert "FINISHED" in result
+    assert settings_snapshot() == {
+        "enabled": False,
+        "operation_target": 21,
+        "backup_slots": 4,
+        "backup_directory": str(dialog_backups),
+        "quiet_period": 0.65,
+    }
 
     settings = bpy.context.scene.cyclic_auto_backup_settings
     settings.enabled = True

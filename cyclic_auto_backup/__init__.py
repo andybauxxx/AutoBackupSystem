@@ -27,7 +27,7 @@ from bpy.types import AddonPreferences, Operator, Panel, PropertyGroup
 bl_info = {
     "name": "AutoBackupSystem",
     "author": "Andy Bau",
-    "version": (1, 4, 5),
+    "version": (1, 4, 6),
     "blender": (4, 2, 0),
     "location": "3D Viewport > Sidebar > Auto Backup",
     "description": "Create a rotating .blend backup after a set number of meaningful edits",
@@ -1007,6 +1007,24 @@ class CYCLICBACKUP_OT_file_settings(Operator):
     bl_options = {"INTERNAL"}
 
     auto_prompt: BoolProperty(default=False, options={"HIDDEN", "SKIP_SAVE"})
+    enabled: BoolProperty(name="Enabled", default=True, options={"SKIP_SAVE"})
+    backup_directory: StringProperty(
+        name="Folder", default="", subtype="DIR_PATH", options={"SKIP_SAVE"}
+    )
+    operation_target: IntProperty(
+        name="Edit Target",
+        default=DEFAULT_OPERATION_TARGET,
+        min=1,
+        max=10000,
+        options={"SKIP_SAVE"},
+    )
+    backup_slots: IntProperty(
+        name="Keep Files",
+        default=DEFAULT_BACKUP_SLOTS,
+        min=1,
+        max=100,
+        options={"SKIP_SAVE"},
+    )
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
@@ -1020,17 +1038,33 @@ class CYCLICBACKUP_OT_file_settings(Operator):
             return
 
         column = layout.column(align=True)
-        column.prop(settings, "enabled", text="Enabled")
-        column.prop(settings, "backup_directory", text="Folder")
-        column.prop(settings, "operation_target", text="Edit Target")
-        column.prop(settings, "backup_slots", text="Keep Files")
+        column.prop(self, "enabled", text="Enabled")
+        column.prop(self, "backup_directory", text="Folder")
+        column.prop(self, "operation_target", text="Edit Target")
+        column.prop(self, "backup_slots", text="Keep Files")
 
     def invoke(self, context: bpy.types.Context, _event: bpy.types.Event) -> set[str]:
         _suppress_plugin_ui_activity()
+        settings = _settings(context)
+        if settings is None:
+            self.report({"ERROR"}, "File-specific settings are unavailable")
+            return {"CANCELLED"}
+        self.enabled = bool(settings.enabled)
+        self.backup_directory = str(settings.backup_directory)
+        self.operation_target = int(settings.operation_target)
+        self.backup_slots = int(settings.backup_slots)
         return context.window_manager.invoke_props_dialog(self, width=420)
 
-    def execute(self, _context: bpy.types.Context) -> set[str]:
+    def execute(self, context: bpy.types.Context) -> set[str]:
         _suppress_plugin_ui_activity()
+        settings = _settings(context)
+        if settings is None:
+            self.report({"ERROR"}, "File-specific settings are unavailable")
+            return {"CANCELLED"}
+        settings.enabled = bool(self.enabled)
+        settings.backup_directory = str(self.backup_directory).strip()
+        settings.operation_target = int(self.operation_target)
+        settings.backup_slots = int(self.backup_slots)
         _RUNTIME["setup_prompted_session"] = True
         _tag_redraw()
         return {"FINISHED"}

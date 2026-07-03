@@ -37,13 +37,13 @@ The extension source and usage details are in [`cyclic_auto_backup/README.md`](c
 From the project root, run Blender's extension builder:
 
 ```powershell
-& 'C:\Program Files\Blender Foundation\Blender 5.0\blender.exe' --command extension build --source-dir '.\cyclic_auto_backup' --output-filepath '.\auto_backup_system-1.4.5.zip' --verbose
+& 'C:\Program Files\Blender Foundation\Blender 5.0\blender.exe' --command extension build --source-dir '.\cyclic_auto_backup' --output-filepath '.\auto_backup_system-1.4.6.zip' --verbose
 ```
 
 ## Validate
 
 ```powershell
-& 'C:\Program Files\Blender Foundation\Blender 5.0\blender.exe' --command extension validate '.\auto_backup_system-1.4.5.zip'
+& 'C:\Program Files\Blender Foundation\Blender 5.0\blender.exe' --command extension validate '.\auto_backup_system-1.4.6.zip'
 ```
 
 ## License

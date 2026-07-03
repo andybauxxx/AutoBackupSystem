@@ -18,7 +18,7 @@ Blender does not expose one universal “operation completed” event across eve
 
 1. Open `Edit > Preferences > Add-ons` in Blender.
 2. Choose `Install from Disk...`.
-3. Select `auto_backup_system-1.4.5.zip`.
+3. Select `auto_backup_system-1.4.6.zip`.
 4. Enable `AutoBackupSystem`.
 5. Open the `Auto Backup` tab in the 3D Viewport sidebar (`N`).
 

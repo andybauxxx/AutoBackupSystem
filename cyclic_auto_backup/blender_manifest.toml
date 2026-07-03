@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "cyclic_auto_backup"
-version = "1.4.5"
+version = "1.4.6"
 name = "AutoBackupSystem"
 tagline = "Create a rotating backup after a set number of meaningful edits"
 maintainer = "Andy Bau"
